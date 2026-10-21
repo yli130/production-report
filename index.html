@@ -222,7 +222,6 @@
 </head>
 <body>
 <div class="toast" id="toast"></div>
-
 <div class="nav-bar">
     <button class="nav-btn active" onclick="switchPage('form')">📝 录入</button>
     <button class="nav-btn" onclick="switchPage('data')">📊 数据</button>
@@ -372,16 +371,85 @@
 
 <script>
 // =============================================
-// ✅ 已配置好的飞书信息（无需修改）
+// 飞书配置 - 直接调用API（无需Worker）
 // =============================================
-const FEISHU_CONFIG = {
-    appId:         'cli_aa52f7a68c385d24',
-    appSecret:     'GJmZz4Xq9Juc6H1T5WUgPhBWBZKeW3r4',
-    appToken:      'TTHPbmtomalekLsj0WycJMpZnxb',
-    tableReports:  'tblqqP5jhaHMVoiS',
-    tableDetails:  'tbl5oSkJyZQlnJ1v',
-    workerUrl:     'https://feishu-proxy.yli130.workers.dev'
+const FEISHU = {
+    appId:        'cli_aa52f7a68c385d24',
+    appSecret:    'GJmZz4Xq9Juc6H1T5WUgPhBWBZKeW3r4',
+    appToken:     'TTHPbmtomalekLsj0WycJMpZnxb',
+    tableReports: 'tblqqP5jhaHMVoiS',
+    tableDetails: 'tbl5oSkJyZQlnJ1v',
+    baseUrl:      'https://open.feishu.cn/open-apis'
 };
+
+// Token缓存
+let _token = null;
+let _tokenExpire = 0;
+
+// 获取Token
+async function getToken() {
+    if (_token && Date.now() < _tokenExpire) return _token;
+    const res = await fetch(
+        `${FEISHU.baseUrl}/auth/v3/tenant_access_token/internal`,
+        {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                app_id: FEISHU.appId,
+                app_secret: FEISHU.appSecret
+            })
+        }
+    );
+    const data = await res.json();
+    if (data.code !== 0) throw new Error('Token获取失败: ' + data.msg);
+    _token = data.tenant_access_token;
+    _tokenExpire = Date.now() + (data.expire - 60) * 1000;
+    return _token;
+}
+
+// 飞书API请求
+async function feishuAPI(method, path, body) {
+    const token = await getToken();
+    const url = `${FEISHU.baseUrl}/bitable/v1/apps/${FEISHU.appToken}${path}`;
+    const opts = {
+        method,
+        headers: {
+            'Authorization': 'Bearer ' + token,
+            'Content-Type': 'application/json'
+        }
+    };
+    if (body) opts.body = JSON.stringify(body);
+    const res = await fetch(url, opts);
+    const data = await res.json();
+    if (data.code !== 0) throw new Error(data.msg || 'API错误:' + data.code);
+    return data.data;
+}
+
+// 新增单条记录
+async function addRecord(tableId, fields) {
+    return feishuAPI('POST', `/tables/${tableId}/records`, { fields });
+}
+
+// 批量新增记录
+async function batchAdd(tableId, fieldsList) {
+    return feishuAPI('POST', `/tables/${tableId}/records/batch_create`,
+        { records: fieldsList.map(f => ({ fields: f })) });
+}
+
+// 查询记录
+async function queryRecords(tableId, params = {}) {
+    const q = new URLSearchParams();
+    if (params.filter) q.set('filter', params.filter);
+    if (params.page_size) q.set('page_size', String(params.page_size));
+    if (params.page_token) q.set('page_token', params.page_token);
+    q.set('sort', JSON.stringify([{ field_name: 'submit_time', order: 'DESC' }]));
+    return feishuAPI('GET', `/tables/${tableId}/records?${q}`);
+}
+
+// 删除记录
+async function deleteRecord(tableId, recordId) {
+    return feishuAPI('DELETE', `/tables/${tableId}/records/${recordId}`);
+}
 
 // =============================================
 // 工序数据
@@ -451,68 +519,6 @@ const processData = {
 };
 
 // =============================================
-// 飞书API
-// =============================================
-let feishuToken = null;
-let tokenExpireAt = 0;
-
-async function getToken() {
-    if (feishuToken && Date.now() < tokenExpireAt) return feishuToken;
-    const res = await fetch(
-        `${FEISHU_CONFIG.workerUrl}/auth/v3/tenant_access_token/internal`,
-        {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                app_id: FEISHU_CONFIG.appId,
-                app_secret: FEISHU_CONFIG.appSecret
-            })
-        }
-    );
-    const data = await res.json();
-    if (data.code !== 0) throw new Error('获取Token失败:' + data.msg);
-    feishuToken = data.tenant_access_token;
-    tokenExpireAt = Date.now() + (data.expire - 60) * 1000;
-    return feishuToken;
-}
-
-async function feishuAPI(method, path, body) {
-    const token = await getToken();
-    const url = `${FEISHU_CONFIG.workerUrl}/bitable/v1/apps/${FEISHU_CONFIG.appToken}${path}`;
-    const opts = {
-        method,
-        headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' }
-    };
-    if (body) opts.body = JSON.stringify(body);
-    const res = await fetch(url, opts);
-    const data = await res.json();
-    if (data.code !== 0) throw new Error(data.msg || '飞书API错误');
-    return data.data;
-}
-
-async function addRecord(tableId, fields) {
-    return feishuAPI('POST', `/tables/${tableId}/records`, { fields });
-}
-
-async function batchAdd(tableId, fieldsList) {
-    return feishuAPI('POST', `/tables/${tableId}/records/batch_create`,
-        { records: fieldsList.map(f => ({ fields: f })) });
-}
-
-async function queryRecords(tableId, params = {}) {
-    const q = new URLSearchParams();
-    if (params.filter) q.set('filter', params.filter);
-    if (params.page_size) q.set('page_size', String(params.page_size));
-    if (params.page_token) q.set('page_token', params.page_token);
-    q.set('sort', JSON.stringify([{ field_name: 'submit_time', order: 'DESC' }]));
-    return feishuAPI('GET', `/tables/${tableId}/records?${q}`);
-}
-
-async function deleteRecord(tableId, recordId) {
-    return feishuAPI('DELETE', `/tables/${tableId}/records/${recordId}`);
-}
-
-// =============================================
 // 录入页
 // =============================================
 let rowCount = 0;
@@ -538,32 +544,39 @@ function addRow() {
         <button class="delete-btn" onclick="deleteRow('${id}')">✕ 删除</button>
         <div style="margin-top:10px">
             <div class="form-grid-3">
-                <div class="form-group"><label>项目</label><input type="text" id="${id}_project" placeholder="如：970B"></div>
-                <div class="form-group"><label>订单号 <span class="required">*</span></label><input type="text" id="${id}_order" placeholder="订单号"></div>
-                <div class="form-group"><label>套数</label><input type="number" id="${id}_sets" placeholder="套数" min="0"></div>
+                <div class="form-group"><label>项目</label>
+                    <input type="text" id="${id}_project" placeholder="如：970B"></div>
+                <div class="form-group"><label>订单号 <span class="required">*</span></label>
+                    <input type="text" id="${id}_order" placeholder="订单号"></div>
+                <div class="form-group"><label>套数</label>
+                    <input type="number" id="${id}_sets" placeholder="套数" min="0"></div>
             </div>
             <div class="form-grid-3">
-                <div class="form-group"><label>刀模个数</label><input type="number" id="${id}_mold_count" placeholder="刀模个数" min="0"></div>
+                <div class="form-group"><label>刀模个数</label>
+                    <input type="number" id="${id}_mold_count" placeholder="刀模个数" min="0"></div>
                 <div class="form-group"><label>工序 <span class="required">*</span></label>
                     <select id="${id}_process" onchange="updateMold('${id}')">
                         <option value="">-- 请选择工序 --</option>
-                        ${Object.keys(processData).map(p => `<option value="${p}">${p}</option>`).join('')}
-                    </select>
-                </div>
-                <div class="form-group"><label>机台</label><input type="text" id="${id}_machine" placeholder="机台编号"></div>
+                        ${Object.keys(processData).map(p=>`<option value="${p}">${p}</option>`).join('')}
+                    </select></div>
+                <div class="form-group"><label>机台</label>
+                    <input type="text" id="${id}_machine" placeholder="机台编号"></div>
             </div>
             <div class="form-grid-3">
                 <div class="form-group"><label>模具编号 <span class="required">*</span></label>
                     <select id="${id}_mold" onchange="updateTarget('${id}')" disabled>
                         <option value="">-- 请先选择工序 --</option>
-                    </select>
-                </div>
-                <div class="form-group"><label>每个订单工时</label><input type="number" id="${id}_hours" placeholder="工时(h)" step="0.25" min="0"></div>
-                <div class="form-group"><label>每小时目标片数</label><input type="number" id="${id}_target" placeholder="自动填入" readonly class="auto-fill"></div>
+                    </select></div>
+                <div class="form-group"><label>每个订单工时</label>
+                    <input type="number" id="${id}_hours" placeholder="工时(h)" step="0.25" min="0"></div>
+                <div class="form-group"><label>每小时目标片数</label>
+                    <input type="number" id="${id}_target" placeholder="自动填入" readonly class="auto-fill"></div>
             </div>
             <div class="form-grid">
-                <div class="form-group"><label>实际片数 <span class="required">*</span></label><input type="number" id="${id}_actual" placeholder="实际片数" min="0" oninput="updateTotal()"></div>
-                <div class="form-group"><label>备注</label><input type="text" id="${id}_remark" placeholder="备注（选填）"></div>
+                <div class="form-group"><label>实际片数 <span class="required">*</span></label>
+                    <input type="number" id="${id}_actual" placeholder="实际片数" min="0" oninput="updateTotal()"></div>
+                <div class="form-group"><label>备注</label>
+                    <input type="text" id="${id}_remark" placeholder="备注（选填）"></div>
             </div>
         </div>`;
     document.getElementById('records-container').appendChild(div);
@@ -572,118 +585,126 @@ function addRow() {
 function deleteRow(id) { document.getElementById(id)?.remove(); updateTotal(); }
 
 function updateMold(id) {
-    const proc = document.getElementById(id + '_process').value;
-    const moldSel = document.getElementById(id + '_mold');
-    document.getElementById(id + '_target').value = '';
+    const proc = document.getElementById(id+'_process').value;
+    const moldSel = document.getElementById(id+'_mold');
+    document.getElementById(id+'_target').value = '';
     moldSel.innerHTML = '<option value="">-- 请选择模具 --</option>';
     if (proc && processData[proc]) {
         Object.keys(processData[proc]).forEach(m => {
             const o = document.createElement('option');
-            o.value = m; o.textContent = m + '（' + processData[proc][m] + '片/h）';
+            o.value = m;
+            o.textContent = m + '（' + processData[proc][m] + '片/h）';
             moldSel.appendChild(o);
         });
         moldSel.disabled = false;
-    } else { moldSel.disabled = true; }
+    } else {
+        moldSel.disabled = true;
+    }
 }
 
 function updateTarget(id) {
-    const proc = document.getElementById(id + '_process').value;
-    const mold = document.getElementById(id + '_mold').value;
-    document.getElementById(id + '_target').value =
+    const proc = document.getElementById(id+'_process').value;
+    const mold = document.getElementById(id+'_mold').value;
+    document.getElementById(id+'_target').value =
         (proc && mold && processData[proc]?.[mold]) ? processData[proc][mold] : '';
 }
 
 function updateTotal() {
     let t = 0;
-    document.querySelectorAll('[id$="_actual"]').forEach(i => t += parseInt(i.value) || 0);
+    document.querySelectorAll('[id$="_actual"]').forEach(i => t += parseInt(i.value)||0);
     document.getElementById('total-pieces').textContent = t;
 }
 
 async function submitForm() {
     const date = document.getElementById('date').value;
     const op1 = document.getElementById('operator1').value.trim();
-    if (!date) { showToast('请填写日期！', 'error'); return; }
-    if (!op1) { showToast('请填写操作员1！', 'error'); return; }
+    if (!date) { showToast('请填写日期！','error'); return; }
+    if (!op1)  { showToast('请填写操作员1！','error'); return; }
 
     const rows = document.querySelectorAll('.record-row');
-    if (!rows.length) { showToast('请至少添加一行记录！', 'error'); return; }
+    if (!rows.length) { showToast('请至少添加一行记录！','error'); return; }
 
     let hasError = false;
     const details = [];
     rows.forEach((row, idx) => {
         const rid = row.id;
-        const order = document.getElementById(rid + '_order').value.trim();
-        const process = document.getElementById(rid + '_process').value;
-        const mold = document.getElementById(rid + '_mold').value;
-        const actual = document.getElementById(rid + '_actual').value;
-        if (!order || !process || !mold || !actual) {
-            showToast(`第${idx + 1}行：订单号、工序、模具、实际片数必填！`, 'error');
+        const order   = document.getElementById(rid+'_order').value.trim();
+        const process = document.getElementById(rid+'_process').value;
+        const mold    = document.getElementById(rid+'_mold').value;
+        const actual  = document.getElementById(rid+'_actual').value;
+        if (!order||!process||!mold||!actual) {
+            showToast(`第${idx+1}行：订单号、工序、模具、实际片数必填！`,'error');
             hasError = true; return;
         }
-        const target = parseInt(document.getElementById(rid + '_target').value) || 0;
-        const hours = parseFloat(document.getElementById(rid + '_hours').value) || 0;
+        const target = parseInt(document.getElementById(rid+'_target').value)||0;
+        const hours  = parseFloat(document.getElementById(rid+'_hours').value)||0;
         const actualN = parseInt(actual);
         const targetTotal = target * hours;
         details.push({
-            project: document.getElementById(rid + '_project').value.trim(),
-            order_no: order,
-            sets_count: parseInt(document.getElementById(rid + '_sets').value) || 0,
-            mold_count: parseInt(document.getElementById(rid + '_mold_count').value) || 0,
-            process_name: process,
-            machine: document.getElementById(rid + '_machine').value.trim(),
-            mold_no: mold,
+            project:         document.getElementById(rid+'_project').value.trim(),
+            order_no:        order,
+            sets_count:      parseInt(document.getElementById(rid+'_sets').value)||0,
+            mold_count:      parseInt(document.getElementById(rid+'_mold_count').value)||0,
+            process_name:    process,
+            machine:         document.getElementById(rid+'_machine').value.trim(),
+            mold_no:         mold,
             hours_per_order: hours,
             target_per_hour: target,
-            target_total: targetTotal,
-            actual_pieces: actualN,
-            efficiency: targetTotal > 0 ? parseFloat((actualN / targetTotal * 100).toFixed(2)) : 0,
-            remark: document.getElementById(rid + '_remark').value.trim()
+            target_total:    targetTotal,
+            actual_pieces:   actualN,
+            efficiency:      targetTotal>0 ? parseFloat((actualN/targetTotal*100).toFixed(2)) : 0,
+            remark:          document.getElementById(rid+'_remark').value.trim()
         });
     });
     if (hasError) return;
 
-    const totalPieces = parseInt(document.getElementById('total-pieces').textContent) || 0;
+    const totalPieces = parseInt(document.getElementById('total-pieces').textContent)||0;
     const reportId = 'RPT_' + Date.now();
     const op2 = document.getElementById('operator2').value.trim();
     const op3 = document.getElementById('operator3').value.trim();
     const shift = document.getElementById('shift').value;
-    const now = Date.now();
 
     const btn = document.getElementById('submit-btn');
     btn.disabled = true; btn.textContent = '⏳ 提交中...';
-    showToast('⏳ 正在提交到飞书...', 'loading');
+    showToast('⏳ 正在提交到飞书...','loading');
 
     try {
-        await addRecord(FEISHU_CONFIG.tableReports, {
-            report_id: reportId,
-            report_date: new Date(date).getTime(),
-            shift, operator1: op1,
-            operator2: op2 || '',
-            operator3: op3 || '',
+        // 写入主表
+        await addRecord(FEISHU.tableReports, {
+            report_id:    reportId,
+            report_date:  new Date(date).getTime(),
+            shift,
+            operator1:    op1,
+            operator2:    op2||'',
+            operator3:    op3||'',
             total_pieces: totalPieces,
-            submit_time: now
+            submit_time:  Date.now()
         });
 
-        await batchAdd(FEISHU_CONFIG.tableDetails, details.map(d => ({
-            report_id: reportId,
-            report_date: new Date(date).getTime(),
-            operator1: op1, shift,
-            project: d.project || '',
-            order_no: d.order_no,
-            sets_count: d.sets_count,
-            mold_count: d.mold_count,
-            process_name: d.process_name,
-            machine: d.machine || '',
-            mold_no: d.mold_no,
+        // 批量写入明细表
+        await batchAdd(FEISHU.tableDetails, details.map(d => ({
+            report_id:       reportId,
+            report_date:     new Date(date).getTime(),
+            operator1:       op1,
+            shift,
+            project:         d.project||'',
+            order_no:        d.order_no,
+            sets_count:      d.sets_count,
+            mold_count:      d.mold_count,
+            process_name:    d.process_name,
+            machine:         d.machine||'',
+            mold_no:         d.mold_no,
             hours_per_order: d.hours_per_order,
             target_per_hour: d.target_per_hour,
-            target_total: d.target_total,
-            actual_pieces: d.actual_pieces,
-            efficiency: d.efficiency,
-            remark: d.remark || ''
+            target_total:    d.target_total,
+            actual_pieces:   d.actual_pieces,
+            efficiency:      d.efficiency,
+            remark:          d.remark||''
         })));
 
-        showToast('✅ 提交成功！数据已写入飞书', 'success');
+        showToast('✅ 提交成功！数据已写入飞书','success');
+
+        // 重置表单
         document.getElementById('operator1').value = '';
         document.getElementById('operator2').value = '';
         document.getElementById('operator3').value = '';
@@ -692,10 +713,13 @@ async function submitForm() {
         document.getElementById('total-pieces').textContent = '0';
         document.getElementById('date').value = new Date().toISOString().split('T')[0];
         addRow();
-    } catch (e) {
-        showToast('❌ 提交失败：' + e.message, 'error');
+
+    } catch(e) {
+        showToast('❌ 提交失败：' + e.message,'error');
+        console.error(e);
     } finally {
-        btn.disabled = false; btn.textContent = '提 交 报 表';
+        btn.disabled = false;
+        btn.textContent = '提 交 报 表';
     }
 }
 
@@ -711,40 +735,43 @@ async function loadData() {
     const container = document.getElementById('data-container');
     container.innerHTML = '<div class="no-data"><div class="icon">⏳</div><div>加载中...</div></div>';
     try {
-        const startDate = document.getElementById('f-start').value;
-        const endDate = document.getElementById('f-end').value;
-        const opFilter = document.getElementById('f-op').value.trim();
+        const startDate  = document.getElementById('f-start').value;
+        const endDate    = document.getElementById('f-end').value;
+        const opFilter   = document.getElementById('f-op').value.trim();
         const procFilter = document.getElementById('f-process').value;
 
         let filters = [];
         if (startDate) filters.push(`CurrentValue.[report_date]>=${new Date(startDate).getTime()}`);
-        if (endDate) filters.push(`CurrentValue.[report_date]<=${new Date(endDate + 'T23:59:59').getTime()}`);
-        if (opFilter) filters.push(`CurrentValue.[operator1].contains("${opFilter}")`);
+        if (endDate)   filters.push(`CurrentValue.[report_date]<=${new Date(endDate+'T23:59:59').getTime()}`);
+        if (opFilter)  filters.push(`CurrentValue.[operator1].contains("${opFilter}")`);
         const filterStr = filters.length ? `AND(${filters.join(',')})` : '';
 
         let items = [], token = '';
         do {
-            const res = await queryRecords(FEISHU_CONFIG.tableReports, { filter: filterStr, page_size: 100, page_token: token });
-            items = items.concat(res.items || []);
-            token = res.page_token || '';
-        } while (token);
+            const res = await queryRecords(FEISHU.tableReports, {
+                filter: filterStr, page_size: 100, page_token: token
+            });
+            items = items.concat(res.items||[]);
+            token = res.page_token||'';
+        } while(token);
 
         if (procFilter) {
             const ids = new Set();
             let dt = '';
             do {
-                const dr = await queryRecords(FEISHU_CONFIG.tableDetails, {
-                    filter: `CurrentValue.[process_name]="${procFilter}"`, page_size: 100, page_token: dt
+                const dr = await queryRecords(FEISHU.tableDetails, {
+                    filter: `CurrentValue.[process_name]="${procFilter}"`,
+                    page_size: 100, page_token: dt
                 });
-                (dr.items || []).forEach(i => ids.add(i.fields.report_id));
-                dt = dr.page_token || '';
-            } while (dt);
+                (dr.items||[]).forEach(i => ids.add(i.fields.report_id));
+                dt = dr.page_token||'';
+            } while(dt);
             items = items.filter(r => ids.has(r.fields.report_id));
         }
 
         allRecords = items; curPage = 1;
         renderDataPage();
-    } catch (e) {
+    } catch(e) {
         container.innerHTML = `<div class="no-data"><div class="icon">❌</div><div>加载失败：${e.message}</div></div>`;
     }
 }
@@ -756,41 +783,44 @@ function renderDataPage() {
         container.innerHTML = '<div class="no-data"><div class="icon">📭</div><div>暂无数据</div></div>';
         document.getElementById('pagination').innerHTML = ''; return;
     }
-    const start = (curPage - 1) * PAGE_SIZE;
-    const pageRecs = allRecords.slice(start, start + PAGE_SIZE);
+    const start = (curPage-1)*PAGE_SIZE;
+    const pageRecs = allRecords.slice(start, start+PAGE_SIZE);
     let html = `<div class="table-wrap"><table class="data-table"><thead><tr>
         <th>日期</th><th>班次</th><th>操作员</th><th>合计片数</th><th>提交时间</th><th>操作</th>
     </tr></thead><tbody>`;
     pageRecs.forEach(r => {
         const f = r.fields;
-        const ops = [f.operator1, f.operator2, f.operator3].filter(Boolean).join('、');
+        const ops = [f.operator1,f.operator2,f.operator3].filter(Boolean).join('、');
         const dateStr = f.report_date ? new Date(f.report_date).toLocaleDateString('zh-CN') : '-';
         const timeStr = f.submit_time ? new Date(f.submit_time).toLocaleString('zh-CN') : '-';
         const isExp = expandedIds.has(r.record_id);
         html += `<tr>
             <td><span class="badge badge-blue">${dateStr}</span></td>
-            <td><span class="badge badge-purple">${f.shift || '-'}</span></td>
+            <td><span class="badge badge-purple">${f.shift||'-'}</span></td>
             <td>${ops}</td>
-            <td><span class="badge badge-orange">${f.total_pieces || 0} 片</span></td>
+            <td><span class="badge badge-orange">${f.total_pieces||0} 片</span></td>
             <td style="font-size:11px;color:#999">${timeStr}</td>
             <td>
-                <button class="expand-btn" onclick="toggleDetail('${r.record_id}','${f.report_id}')">${isExp ? '▲ 收起' : '▼ 详情'}</button>
+                <button class="expand-btn" onclick="toggleDetail('${r.record_id}','${f.report_id}')">
+                    ${isExp?'▲ 收起':'▼ 详情'}</button>
                 <button class="del-btn" onclick="confirmDel('${r.record_id}','${f.report_id}')">🗑</button>
             </td></tr>`;
         if (isExp) {
-            const dHtml = detailCache[f.report_id] ? renderDetailTable(detailCache[f.report_id]) : '<div style="padding:10px;color:#999;text-align:center">⏳ 加载中...</div>';
+            const dHtml = detailCache[f.report_id]
+                ? renderDetailTable(detailCache[f.report_id])
+                : '<div style="padding:10px;color:#999;text-align:center">⏳ 加载中...</div>';
             html += `<tr><td colspan="6"><div class="detail-inner">${dHtml}</div></td></tr>`;
         }
     });
     html += '</tbody></table></div>';
     container.innerHTML = html;
 
-    const totalPages = Math.ceil(total / PAGE_SIZE);
+    const totalPages = Math.ceil(total/PAGE_SIZE);
     let pg = `<span class="page-info">共${total}条 第${curPage}/${totalPages}页</span>`;
-    if (curPage > 1) pg += `<button class="page-btn" onclick="goPage(${curPage - 1})">‹</button>`;
-    for (let i = Math.max(1, curPage - 2); i <= Math.min(totalPages, curPage + 2); i++)
-        pg += `<button class="page-btn ${i === curPage ? 'active' : ''}" onclick="goPage(${i})">${i}</button>`;
-    if (curPage < totalPages) pg += `<button class="page-btn" onclick="goPage(${curPage + 1})">›</button>`;
+    if (curPage>1) pg += `<button class="page-btn" onclick="goPage(${curPage-1})">‹</button>`;
+    for (let i=Math.max(1,curPage-2); i<=Math.min(totalPages,curPage+2); i++)
+        pg += `<button class="page-btn ${i===curPage?'active':''}" onclick="goPage(${i})">${i}</button>`;
+    if (curPage<totalPages) pg += `<button class="page-btn" onclick="goPage(${curPage+1})">›</button>`;
     document.getElementById('pagination').innerHTML = pg;
 }
 
@@ -803,14 +833,15 @@ async function toggleDetail(recordId, reportId) {
         try {
             let items = [], token = '';
             do {
-                const res = await queryRecords(FEISHU_CONFIG.tableDetails, {
-                    filter: `CurrentValue.[report_id]="${reportId}"`, page_size: 100, page_token: token
+                const res = await queryRecords(FEISHU.tableDetails, {
+                    filter: `CurrentValue.[report_id]="${reportId}"`,
+                    page_size: 100, page_token: token
                 });
-                items = items.concat(res.items || []);
-                token = res.page_token || '';
-            } while (token);
+                items = items.concat(res.items||[]);
+                token = res.page_token||'';
+            } while(token);
             detailCache[reportId] = items; renderDataPage();
-        } catch (e) { console.error(e); }
+        } catch(e) { console.error(e); }
     }
 }
 
@@ -823,16 +854,16 @@ function renderDetailTable(items) {
     items.forEach(item => {
         const f = item.fields;
         const eff = f.efficiency;
-        const c = !eff ? '#999' : eff >= 100 ? '#2e7d32' : eff >= 80 ? '#f57c00' : '#e53935';
+        const c = !eff?'#999':eff>=100?'#2e7d32':eff>=80?'#f57c00':'#e53935';
         html += `<tr>
-            <td>${f.project || '-'}</td><td>${f.order_no || '-'}</td>
-            <td><span class="badge badge-blue">${f.process_name || '-'}</span></td>
-            <td style="font-size:11px">${f.mold_no || '-'}</td>
-            <td>${f.machine || '-'}</td><td>${f.sets_count || '-'}</td>
-            <td>${f.hours_per_order || '-'}h</td><td>${f.target_per_hour || '-'}</td>
-            <td><strong>${f.actual_pieces || 0}</strong></td>
-            <td style="color:${c};font-weight:bold">${eff ? eff + '%' : '-'}</td>
-            <td style="font-size:11px;color:#999">${f.remark || '-'}</td>
+            <td>${f.project||'-'}</td><td>${f.order_no||'-'}</td>
+            <td><span class="badge badge-blue">${f.process_name||'-'}</span></td>
+            <td style="font-size:11px">${f.mold_no||'-'}</td>
+            <td>${f.machine||'-'}</td><td>${f.sets_count||'-'}</td>
+            <td>${f.hours_per_order||'-'}h</td><td>${f.target_per_hour||'-'}</td>
+            <td><strong>${f.actual_pieces||0}</strong></td>
+            <td style="color:${c};font-weight:bold">${eff?eff+'%':'-'}</td>
+            <td style="font-size:11px;color:#999">${f.remark||'-'}</td>
         </tr>`;
     });
     return html + '</tbody></table>';
@@ -840,44 +871,46 @@ function renderDetailTable(items) {
 
 async function confirmDel(recordId, reportId) {
     if (!confirm('确定删除？不可恢复！')) return;
-    showToast('⏳ 删除中...', 'loading');
+    showToast('⏳ 删除中...','loading');
     try {
-        await deleteRecord(FEISHU_CONFIG.tableReports, recordId);
-        let items = detailCache[reportId] || [];
+        await deleteRecord(FEISHU.tableReports, recordId);
+        let items = detailCache[reportId]||[];
         if (!items.length) {
             let token = '';
             do {
-                const res = await queryRecords(FEISHU_CONFIG.tableDetails, {
-                    filter: `CurrentValue.[report_id]="${reportId}"`, page_size: 100, page_token: token
+                const res = await queryRecords(FEISHU.tableDetails, {
+                    filter: `CurrentValue.[report_id]="${reportId}"`,
+                    page_size: 100, page_token: token
                 });
-                items = items.concat(res.items || []);
-                token = res.page_token || '';
-            } while (token);
+                items = items.concat(res.items||[]);
+                token = res.page_token||'';
+            } while(token);
         }
-        for (const item of items) await deleteRecord(FEISHU_CONFIG.tableDetails, item.record_id);
+        for (const item of items)
+            await deleteRecord(FEISHU.tableDetails, item.record_id);
         delete detailCache[reportId];
         allRecords = allRecords.filter(r => r.record_id !== recordId);
         expandedIds.delete(recordId);
         renderDataPage();
-        showToast('✅ 删除成功', 'success');
-    } catch (e) { showToast('❌ 删除失败：' + e.message, 'error'); }
+        showToast('✅ 删除成功','success');
+    } catch(e) { showToast('❌ 删除失败：'+e.message,'error'); }
 }
 
 function exportCSV() {
-    if (!allRecords.length) { showToast('请先查询数据！', 'error'); return; }
+    if (!allRecords.length) { showToast('请先查询数据！','error'); return; }
     let csv = '\uFEFF日期,班次,操作员1,操作员2,操作员3,合计片数,提交时间\n';
     allRecords.forEach(r => {
         const f = r.fields;
         csv += [
-            f.report_date ? new Date(f.report_date).toLocaleDateString('zh-CN') : '',
-            f.shift || '', f.operator1 || '', f.operator2 || '', f.operator3 || '',
-            f.total_pieces || 0,
-            f.submit_time ? new Date(f.submit_time).toLocaleString('zh-CN') : ''
-        ].map(v => `"${String(v).replace(/"/g, '""')}"`).join(',') + '\n';
+            f.report_date?new Date(f.report_date).toLocaleDateString('zh-CN'):'',
+            f.shift||'', f.operator1||'', f.operator2||'', f.operator3||'',
+            f.total_pieces||0,
+            f.submit_time?new Date(f.submit_time).toLocaleString('zh-CN'):''
+        ].map(v=>`"${String(v).replace(/"/g,'""')}"`).join(',')+'\n';
     });
     const a = document.createElement('a');
-    a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8;' }));
-    a.download = `裁切工厂_${new Date().toLocaleDateString('zh-CN').replace(/\//g, '-')}.csv`;
+    a.href = URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8;'}));
+    a.download = `裁切工厂_${new Date().toLocaleDateString('zh-CN').replace(/\//g,'-')}.csv`;
     a.click();
 }
 
@@ -887,7 +920,7 @@ function exportCSV() {
 const COLORS = ['#1a237e','#2e7d32','#e65100','#6a1b9a','#00838f','#c62828','#4527a0','#1565c0','#558b2f','#f9a825'];
 
 async function loadDashboard() {
-    showToast('⏳ 加载看板数据...', 'loading');
+    showToast('⏳ 加载看板数据...','loading');
     try {
         const period = parseInt(document.getElementById('dash-period').value);
         let filterStr = '';
@@ -896,98 +929,113 @@ async function loadDashboard() {
             cutoff.setDate(cutoff.getDate() - period);
             filterStr = `CurrentValue.[report_date]>=${cutoff.getTime()}`;
         }
-        let details = [], reports = [], t1 = '', t2 = '';
+        let details=[], reports=[], t1='', t2='';
         do {
-            const r = await queryRecords(FEISHU_CONFIG.tableDetails, { filter: filterStr, page_size: 100, page_token: t1 });
-            details = details.concat((r.items || []).map(i => i.fields));
-            t1 = r.page_token || '';
-        } while (t1);
+            const r = await queryRecords(FEISHU.tableDetails,{filter:filterStr,page_size:100,page_token:t1});
+            details = details.concat((r.items||[]).map(i=>i.fields));
+            t1 = r.page_token||'';
+        } while(t1);
         do {
-            const r = await queryRecords(FEISHU_CONFIG.tableReports, { filter: filterStr, page_size: 100, page_token: t2 });
-            reports = reports.concat((r.items || []).map(i => i.fields));
-            t2 = r.page_token || '';
-        } while (t2);
+            const r = await queryRecords(FEISHU.tableReports,{filter:filterStr,page_size:100,page_token:t2});
+            reports = reports.concat((r.items||[]).map(i=>i.fields));
+            t2 = r.page_token||'';
+        } while(t2);
         renderDashboard(reports, details);
-        showToast('✅ 看板已更新', 'success');
-    } catch (e) { showToast('❌ 加载失败：' + e.message, 'error'); }
+        showToast('✅ 看板已更新','success');
+    } catch(e) { showToast('❌ 加载失败：'+e.message,'error'); }
 }
 
 function renderDashboard(reports, details) {
-    const totalPieces = details.reduce((s, d) => s + (parseInt(d.actual_pieces) || 0), 0);
-    const dates = [...new Set(reports.map(r => new Date(r.report_date).toLocaleDateString('zh-CN')))];
-    const avgPieces = dates.length ? Math.round(totalPieces / dates.length) : 0;
-    const effRows = details.filter(d => d.efficiency > 0);
-    const avgEff = effRows.length ? Math.round(effRows.reduce((s, d) => s + (parseFloat(d.efficiency) || 0), 0) / effRows.length) : null;
+    const totalPieces = details.reduce((s,d)=>s+(parseInt(d.actual_pieces)||0),0);
+    const dates = [...new Set(reports.map(r=>new Date(r.report_date).toLocaleDateString('zh-CN')))];
+    const avgPieces = dates.length ? Math.round(totalPieces/dates.length) : 0;
+    const effRows = details.filter(d=>d.efficiency>0);
+    const avgEff = effRows.length
+        ? Math.round(effRows.reduce((s,d)=>s+(parseFloat(d.efficiency)||0),0)/effRows.length)
+        : null;
 
     document.getElementById('kpi-reports').textContent = reports.length;
-    document.getElementById('kpi-pieces').textContent = totalPieces.toLocaleString();
-    document.getElementById('kpi-avg').textContent = avgPieces.toLocaleString();
-    document.getElementById('kpi-eff').textContent = avgEff !== null ? avgEff + '%' : '-';
+    document.getElementById('kpi-pieces').textContent  = totalPieces.toLocaleString();
+    document.getElementById('kpi-avg').textContent     = avgPieces.toLocaleString();
+    document.getElementById('kpi-eff').textContent     = avgEff!==null ? avgEff+'%' : '-';
 
     const procMap = {};
-    details.forEach(d => { procMap[d.process_name] = (procMap[d.process_name] || 0) + (parseInt(d.actual_pieces) || 0); });
-    const sortedProc = Object.entries(procMap).sort((a, b) => b[1] - a[1]);
-    renderBar('process-chart', sortedProc.slice(0, 8), COLORS);
+    details.forEach(d=>{procMap[d.process_name]=(procMap[d.process_name]||0)+(parseInt(d.actual_pieces)||0);});
+    const sortedProc = Object.entries(procMap).sort((a,b)=>b[1]-a[1]);
+    renderBar('process-chart', sortedProc.slice(0,8), COLORS);
 
     const opMap = {};
-    reports.forEach(r => {
-        [r.operator1, r.operator2, r.operator3].filter(Boolean).forEach(op => {
-            opMap[op] = (opMap[op] || 0) + (parseInt(r.total_pieces) || 0);
+    reports.forEach(r=>{
+        [r.operator1,r.operator2,r.operator3].filter(Boolean).forEach(op=>{
+            opMap[op]=(opMap[op]||0)+(parseInt(r.total_pieces)||0);
         });
     });
-    renderBar('operator-chart', Object.entries(opMap).sort((a, b) => b[1] - a[1]).slice(0, 8), COLORS.slice(3));
+    renderBar('operator-chart', Object.entries(opMap).sort((a,b)=>b[1]-a[1]).slice(0,8), COLORS.slice(3));
 
-    renderPie(sortedProc.slice(0, 8));
+    renderPie(sortedProc.slice(0,8));
 
     const dayMap = {};
-    reports.forEach(r => {
+    reports.forEach(r=>{
         const d = new Date(r.report_date).toLocaleDateString('zh-CN');
-        dayMap[d] = (dayMap[d] || 0) + (parseInt(r.total_pieces) || 0);
+        dayMap[d]=(dayMap[d]||0)+(parseInt(r.total_pieces)||0);
     });
     renderLine(dayMap);
 
     const procEffMap = {};
-    details.forEach(d => {
-        if (!procEffMap[d.process_name]) procEffMap[d.process_name] = { actual: 0, target: 0 };
-        procEffMap[d.process_name].actual += parseInt(d.actual_pieces) || 0;
-        procEffMap[d.process_name].target += parseInt(d.target_total) || 0;
+    details.forEach(d=>{
+        if (!procEffMap[d.process_name]) procEffMap[d.process_name]={actual:0,target:0};
+        procEffMap[d.process_name].actual += parseInt(d.actual_pieces)||0;
+        procEffMap[d.process_name].target += parseInt(d.target_total)||0;
     });
     document.getElementById('eff-tbody').innerHTML = Object.entries(procEffMap)
-        .sort((a, b) => b[1].actual - a[1].actual)
-        .map(([proc, data]) => {
-            const eff = data.target > 0 ? Math.round(data.actual / data.target * 100) : null;
-            const c = eff === null ? '#999' : eff >= 100 ? '#2e7d32' : eff >= 80 ? '#f57c00' : '#e53935';
-            return `<tr><td><span class="badge badge-blue">${proc}</span></td><td>${data.actual.toLocaleString()}</td><td>${data.target > 0 ? data.target.toLocaleString() : '-'}</td><td style="color:${c};font-weight:bold">${eff !== null ? eff + '%' : '-'}</td></tr>`;
+        .sort((a,b)=>b[1].actual-a[1].actual)
+        .map(([proc,data])=>{
+            const eff = data.target>0 ? Math.round(data.actual/data.target*100) : null;
+            const c = eff===null?'#999':eff>=100?'#2e7d32':eff>=80?'#f57c00':'#e53935';
+            return `<tr>
+                <td><span class="badge badge-blue">${proc}</span></td>
+                <td>${data.actual.toLocaleString()}</td>
+                <td>${data.target>0?data.target.toLocaleString():'-'}</td>
+                <td style="color:${c};font-weight:bold">${eff!==null?eff+'%':'-'}</td>
+            </tr>`;
         }).join('');
 
     const projMap = {};
-    details.forEach(d => {
-        const key = (d.project || '未命名') + '|' + d.process_name;
-        if (!projMap[key]) projMap[key] = { project: d.project || '未命名', process: d.process_name, pieces: 0, hours: 0, count: 0, effSum: 0, effCnt: 0 };
-        projMap[key].pieces += parseInt(d.actual_pieces) || 0;
-        projMap[key].hours += parseFloat(d.hours_per_order) || 0;
+    details.forEach(d=>{
+        const key=(d.project||'未命名')+'|'+d.process_name;
+        if (!projMap[key]) projMap[key]={project:d.project||'未命名',process:d.process_name,pieces:0,hours:0,count:0,effSum:0,effCnt:0};
+        projMap[key].pieces += parseInt(d.actual_pieces)||0;
+        projMap[key].hours  += parseFloat(d.hours_per_order)||0;
         projMap[key].count++;
-        if (d.efficiency > 0) { projMap[key].effSum += parseFloat(d.efficiency) || 0; projMap[key].effCnt++; }
+        if (d.efficiency>0){projMap[key].effSum+=parseFloat(d.efficiency)||0;projMap[key].effCnt++;}
     });
     document.getElementById('proj-tbody').innerHTML = Object.values(projMap)
-        .sort((a, b) => b.pieces - a.pieces).slice(0, 20)
-        .map(d => {
-            const ae = d.effCnt > 0 ? Math.round(d.effSum / d.effCnt) : null;
-            const c = ae === null ? '#999' : ae >= 100 ? '#2e7d32' : ae >= 80 ? '#f57c00' : '#e53935';
-            return `<tr><td>${d.project}</td><td><span class="badge badge-blue">${d.process}</span></td><td><strong>${d.pieces.toLocaleString()}</strong></td><td>${d.hours.toFixed(1)}h</td><td>${d.count}</td><td style="color:${c};font-weight:bold">${ae !== null ? ae + '%' : '-'}</td></tr>`;
+        .sort((a,b)=>b.pieces-a.pieces).slice(0,20)
+        .map(d=>{
+            const ae = d.effCnt>0?Math.round(d.effSum/d.effCnt):null;
+            const c = ae===null?'#999':ae>=100?'#2e7d32':ae>=80?'#f57c00':'#e53935';
+            return `<tr>
+                <td>${d.project}</td>
+                <td><span class="badge badge-blue">${d.process}</span></td>
+                <td><strong>${d.pieces.toLocaleString()}</strong></td>
+                <td>${d.hours.toFixed(1)}h</td>
+                <td>${d.count}</td>
+                <td style="color:${c};font-weight:bold">${ae!==null?ae+'%':'-'}</td>
+            </tr>`;
         }).join('');
 }
 
 function renderBar(id, data, colors) {
     const el = document.getElementById(id);
-    if (!data.length) { el.innerHTML = '<div style="color:#999;text-align:center;padding:20px">暂无数据</div>'; return; }
+    if (!data.length){el.innerHTML='<div style="color:#999;text-align:center;padding:20px">暂无数据</div>';return;}
     const max = data[0][1];
-    el.innerHTML = data.map(([label, val], i) => {
-        const pct = max > 0 ? Math.round(val / max * 100) : 0;
+    el.innerHTML = data.map(([label,val],i)=>{
+        const pct = max>0?Math.round(val/max*100):0;
         return `<div class="bar-item">
             <div class="bar-label" title="${label}">${label}</div>
-            <div class="bar-track"><div class="bar-fill" style="width:${pct}%;background:${colors[i % colors.length]}">${pct > 20 ? `<span>${val.toLocaleString()}</span>` : ''}</div></div>
-            <div class="bar-val">${pct <= 20 ? val.toLocaleString() : ''}</div>
+            <div class="bar-track"><div class="bar-fill" style="width:${pct}%;background:${colors[i%colors.length]}">
+                ${pct>20?`<span>${val.toLocaleString()}</span>`:''}</div></div>
+            <div class="bar-val">${pct<=20?val.toLocaleString():''}</div>
         </div>`;
     }).join('');
 }
@@ -995,66 +1043,80 @@ function renderBar(id, data, colors) {
 function renderPie(data) {
     const canvas = document.getElementById('pie-canvas');
     const ctx = canvas.getContext('2d');
-    const total = data.reduce((s, [, v]) => s + v, 0);
+    const total = data.reduce((s,[,v])=>s+v,0);
     if (!total) return;
-    ctx.clearRect(0, 0, 150, 150);
-    let angle = -Math.PI / 2;
-    data.forEach(([, val], i) => {
-        const sweep = val / total * 2 * Math.PI;
-        ctx.beginPath(); ctx.moveTo(75, 75);
-        ctx.arc(75, 75, 65, angle, angle + sweep);
-        ctx.closePath(); ctx.fillStyle = COLORS[i % COLORS.length]; ctx.fill();
-        ctx.strokeStyle = 'white'; ctx.lineWidth = 2; ctx.stroke();
+    ctx.clearRect(0,0,150,150);
+    let angle = -Math.PI/2;
+    data.forEach(([,val],i)=>{
+        const sweep = val/total*2*Math.PI;
+        ctx.beginPath(); ctx.moveTo(75,75);
+        ctx.arc(75,75,65,angle,angle+sweep);
+        ctx.closePath(); ctx.fillStyle=COLORS[i%COLORS.length]; ctx.fill();
+        ctx.strokeStyle='white'; ctx.lineWidth=2; ctx.stroke();
         angle += sweep;
     });
-    ctx.beginPath(); ctx.arc(75, 75, 30, 0, 2 * Math.PI); ctx.fillStyle = 'white'; ctx.fill();
-    document.getElementById('pie-legend').innerHTML = data.map(([label, val], i) => {
-        const pct = Math.round(val / total * 100);
-        return `<div class="legend-item"><div class="legend-dot" style="background:${COLORS[i % COLORS.length]}"></div><div style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${label}">${label}</div><strong style="margin-left:4px">${pct}%</strong></div>`;
+    ctx.beginPath(); ctx.arc(75,75,30,0,2*Math.PI); ctx.fillStyle='white'; ctx.fill();
+    document.getElementById('pie-legend').innerHTML = data.map(([label,val],i)=>{
+        const pct = Math.round(val/total*100);
+        return `<div class="legend-item">
+            <div class="legend-dot" style="background:${COLORS[i%COLORS.length]}"></div>
+            <div style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${label}">${label}</div>
+            <strong style="margin-left:4px">${pct}%</strong>
+        </div>`;
     }).join('');
 }
 
 function renderLine(dayMap) {
     const svg = document.getElementById('line-svg');
     const days = Object.keys(dayMap).sort();
-    const W = svg.parentElement.offsetWidth || 500, H = 180;
+    const W = svg.parentElement.offsetWidth||500, H = 180;
     svg.setAttribute('width', W);
-    if (days.length < 2) { svg.innerHTML = `<text x="${W / 2}" y="${H / 2}" text-anchor="middle" fill="#999" font-size="13">数据不足</text>`; return; }
-    const vals = days.map(d => dayMap[d]);
-    const maxV = Math.max(...vals), minV = Math.min(...vals), range = maxV - minV || 1;
-    const pL = 50, pR = 20, pT = 20, pB = 35, cW = W - pL - pR, cH = H - pT - pB;
-    const pts = days.map((d, i) => ({ x: pL + i / (days.length - 1) * cW, y: pT + cH - (vals[i] - minV) / range * cH, v: vals[i], d }));
-    let s = `<defs><linearGradient id="lg" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#1a237e" stop-opacity="0.25"/><stop offset="100%" stop-color="#1a237e" stop-opacity="0.02"/></linearGradient></defs>`;
-    for (let i = 0; i <= 4; i++) {
-        const y = pT + i / 4 * cH, v = Math.round(maxV - i / 4 * range);
-        s += `<line x1="${pL}" y1="${y}" x2="${W - pR}" y2="${y}" stroke="#e0e4ff" stroke-width="1"/>`;
-        s += `<text x="${pL - 5}" y="${y + 4}" text-anchor="end" font-size="10" fill="#999">${v}</text>`;
+    if (days.length<2){
+        svg.innerHTML=`<text x="${W/2}" y="${H/2}" text-anchor="middle" fill="#999" font-size="13">数据不足</text>`;
+        return;
     }
-    s += `<path d="M${pts[0].x},${pT + cH} ${pts.map(p => `L${p.x},${p.y}`).join(' ')} L${pts[pts.length - 1].x},${pT + cH} Z" fill="url(#lg)"/>`;
-    s += `<path d="M${pts.map(p => `${p.x},${p.y}`).join(' L')}" fill="none" stroke="#1a237e" stroke-width="2.5" stroke-linejoin="round"/>`;
-    const step = Math.max(1, Math.floor(days.length / 7));
-    pts.forEach((p, i) => {
-        s += `<circle cx="${p.x}" cy="${p.y}" r="4" fill="#1a237e" stroke="white" stroke-width="2"/>`;
-        if (i % step === 0 || i === days.length - 1)
-            s += `<text x="${p.x}" y="${H - 5}" text-anchor="middle" font-size="10" fill="#666">${p.d.slice(-5)}</text>`;
+    const vals = days.map(d=>dayMap[d]);
+    const maxV=Math.max(...vals), minV=Math.min(...vals), range=maxV-minV||1;
+    const pL=50,pR=20,pT=20,pB=35,cW=W-pL-pR,cH=H-pT-pB;
+    const pts = days.map((d,i)=>({
+        x: pL+i/(days.length-1)*cW,
+        y: pT+cH-(vals[i]-minV)/range*cH,
+        v: vals[i], d
+    }));
+    let s = `<defs><linearGradient id="lg" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stop-color="#1a237e" stop-opacity="0.25"/>
+        <stop offset="100%" stop-color="#1a237e" stop-opacity="0.02"/>
+    </linearGradient></defs>`;
+    for (let i=0;i<=4;i++){
+        const y=pT+i/4*cH, v=Math.round(maxV-i/4*range);
+        s+=`<line x1="${pL}" y1="${y}" x2="${W-pR}" y2="${y}" stroke="#e0e4ff" stroke-width="1"/>`;
+        s+=`<text x="${pL-5}" y="${y+4}" text-anchor="end" font-size="10" fill="#999">${v}</text>`;
+    }
+    s+=`<path d="M${pts[0].x},${pT+cH} ${pts.map(p=>`L${p.x},${p.y}`).join(' ')} L${pts[pts.length-1].x},${pT+cH} Z" fill="url(#lg)"/>`;
+    s+=`<path d="M${pts.map(p=>`${p.x},${p.y}`).join(' L')}" fill="none" stroke="#1a237e" stroke-width="2.5" stroke-linejoin="round"/>`;
+    const step=Math.max(1,Math.floor(days.length/7));
+    pts.forEach((p,i)=>{
+        s+=`<circle cx="${p.x}" cy="${p.y}" r="4" fill="#1a237e" stroke="white" stroke-width="2"/>`;
+        if (i%step===0||i===days.length-1)
+            s+=`<text x="${p.x}" y="${H-5}" text-anchor="middle" font-size="10" fill="#666">${p.d.slice(-5)}</text>`;
     });
     svg.innerHTML = s;
 }
 
 function switchPage(page) {
-    document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
-    document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
-    document.getElementById('page-' + page).classList.add('active');
-    document.querySelectorAll('.nav-btn')[['form', 'data', 'dashboard'].indexOf(page)].classList.add('active');
-    if (page === 'dashboard') loadDashboard();
+    document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
+    document.querySelectorAll('.nav-btn').forEach(b=>b.classList.remove('active'));
+    document.getElementById('page-'+page).classList.add('active');
+    document.querySelectorAll('.nav-btn')[['form','data','dashboard'].indexOf(page)].classList.add('active');
+    if (page==='dashboard') loadDashboard();
 }
 
 let toastTimer = null;
-function showToast(msg, type = 'success') {
+function showToast(msg, type='success') {
     const el = document.getElementById('toast');
-    el.textContent = msg; el.className = 'toast ' + type; el.style.display = 'block';
+    el.textContent = msg; el.className = 'toast '+type; el.style.display = 'block';
     if (toastTimer) clearTimeout(toastTimer);
-    if (type !== 'loading') toastTimer = setTimeout(() => { el.style.display = 'none'; }, 3000);
+    if (type!=='loading') toastTimer = setTimeout(()=>{el.style.display='none';}, 3000);
 }
 </script>
 </body>
